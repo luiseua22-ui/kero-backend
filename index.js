@@ -1,40 +1,32 @@
 import express from "express";
 import cors from "cors";
-import axios from "axios";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleAI } from "@google/genai";
+import playwright from "playwright";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-// ---------------- SCRAPE ROUTE ------------------
+const ai = new GoogleAI({ apiKey: process.env.GEMINI_API_KEY });
 
 app.post("/scrape", async (req, res) => {
-    try {
-        const { url } = req.body;
+  try {
+    const { url } = req.body;
 
-        if (!url) {
-            return res.status(400).json({ error: "Missing URL" });
-        }
+    // ======== 1. ABRIR O SITE COM PLAYWRIGHT (JS RODANDO) ========
+    const browser = await playwright.chromium.launch({ headless: true });
+    const page = await browser.newPage();
 
-        const model = genAI.getGenerativeModel({
-            model: "gemini-2.0-flash",
-        });
+    await page.goto(url, { waitUntil: "networkidle" });
 
-        const prompt = `
-Você recebe somente a URL de um produto:
+    // Pega o HTML já renderizado
+    const renderedHtml = await page.content();
+    await browser.close();
 
-${url}
-
-Use Google Search para recuperar:
-- Título oficial do produto
-- Preço atual e moeda
-- Imagem principal
-- Imagens adicionais
-
-Retorne APENAS este JSON:
+    // ======== 2. MANDAR PARA O GEMINI ========
+    const prompt = `
+Você recebe o HTML REAL e renderizado de uma página de produto.
+Extraia APENAS o JSON abaixo:
 
 {
   "title": "",
@@ -44,35 +36,52 @@ Retorne APENAS este JSON:
   "additional_images": []
 }
 
-NUNCA retorne texto fora do JSON.
-        `;
+Escolha assim:
+TÍTULO:
+- JSON-LD (product.name)
+- og:title
+- <h1>
 
-        const result = await model.generateContent({
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            tools: [{ google_search: {} }]
-        });
+PREÇO:
+- JSON-LD offers.price
+- Elementos com "price", "preço", "amount"
+- Priorize preço perto de "comprar"
 
-        const raw = result.response.text();
-        const first = raw.indexOf("{");
-        const last = raw.lastIndexOf("}");
+IMAGEM:
+- JSON-LD image
+- og:image
+- Primeira imagem REAL do produto
+- Ignore logos, banners, thumbnails, placeholders
 
-        const jsonString = raw.substring(first, last + 1);
-        
-        const data = JSON.parse(jsonString);
+HTML:
+${renderedHtml}
+`;
 
-        return res.json(data);
+    const result = await ai.models.generateContent({
+      model: "gemini-2.5-pro",
+      contents: prompt,
+    });
 
-    } catch (err) {
-        console.log(err);
-        return res.status(500).json({ error: "Extraction failed" });
-    }
+    const text = result.text();
+    const jsonStart = text.indexOf("{");
+    const jsonEnd = text.lastIndexOf("}");
+    const jsonString = text.substring(jsonStart, jsonEnd + 1);
+
+    const productData = JSON.parse(jsonString);
+
+    res.json(productData);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Erro ao processar o scraping." });
+  }
 });
-
-// ---------------- HOME ROUTE ------------------
 
 app.get("/", (req, res) => {
-    res.send("Kero backend is running!");
+  res.send("Kero backend is running!");
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("Backend rodando na porta " + port));
+app.listen(10000, () => {
+  console.log("Backend rodando na porta 10000");
+});
+
